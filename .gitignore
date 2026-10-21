@@ -1,0 +1,19 @@
+# Dart / Flutter
+.dart_tool/
+build/
+*.iml
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.flutter-plugins
+.flutter-plugins-dependencies
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.*
+!.env.example

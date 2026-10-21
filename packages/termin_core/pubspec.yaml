@@ -1,0 +1,13 @@
+name: termin_core
+description: Shared models and API contracts used by the Termin app and API. Pure Dart, no Flutter.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.13.4
+
+resolution: workspace
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6

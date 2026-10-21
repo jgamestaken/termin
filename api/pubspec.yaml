@@ -1,0 +1,20 @@
+name: termin_api
+description: Termin sync API. Stores opaque, client-side encrypted user vaults.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.13.4
+
+resolution: workspace
+
+dependencies:
+  shelf: ^1.4.2
+  shelf_router: ^1.1.2
+  termin_core:
+    path: ../packages/termin_core
+
+dev_dependencies:
+  http: ^1.2.2
+  lints: ^6.0.0
+  test: ^1.25.6

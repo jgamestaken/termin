@@ -1,0 +1,13 @@
+name: termin_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+
+workspace:
+  - apps/termin
+  - api
+  - packages/termin_core
+
+dev_dependencies:
+  lints: ^6.0.0
