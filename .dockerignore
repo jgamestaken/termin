@@ -3,3 +3,4 @@
 .git/
 .idea/
 apps/
+**/termin.db*

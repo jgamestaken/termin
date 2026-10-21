@@ -6,7 +6,7 @@ import 'package:termin_core/termin_core.dart';
 import 'package:test/test.dart';
 
 void main() {
-  final handler = buildRouter().call;
+  final handler = buildRouter(store: SqliteStore.inMemory()).call;
 
   test('GET /health', () async {
     final response = await handler(

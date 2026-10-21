@@ -9,8 +9,10 @@ environment:
 resolution: workspace
 
 dependencies:
+  cryptography: ^2.9.0
   shelf: ^1.4.2
   shelf_router: ^1.1.2
+  sqlite3: ^3.7.1
   termin_core:
     path: ../packages/termin_core
 

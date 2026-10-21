@@ -17,3 +17,6 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Local API database (DB_PATH default)
+termin.db*

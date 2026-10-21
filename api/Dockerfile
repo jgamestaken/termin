@@ -12,10 +12,15 @@ RUN dart pub get
 COPY api/ api/
 COPY packages/ packages/
 RUN dart build cli --target api/bin/server.dart -o output
+RUN mkdir -p /data
 
 FROM scratch
 COPY --from=build /runtime/ /
 COPY --from=build /app/output/bundle/ /app/
+COPY --from=build /data /data
+
+ENV DB_PATH=/data/termin.db
+VOLUME /data
 
 EXPOSE 8080
 CMD ["/app/bin/server"]
