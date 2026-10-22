@@ -30,6 +30,11 @@ class Auth {
         limit: signupsPerHour,
         window: const Duration(hours: 1),
         clock: _clock,
+      ),
+      _logins = RateLimiter(
+        limit: loginsPerHour,
+        window: const Duration(hours: 1),
+        clock: _clock,
       );
 
   static const challengeTtl = Duration(seconds: 60);
@@ -37,6 +42,12 @@ class Auth {
 
   /// New users a single client address may create per hour.
   static const signupsPerHour = 10;
+
+  /// Logins a single user may make per hour.
+  static const loginsPerHour = 30;
+
+  /// Sessions kept per user. Logging in past this ends the oldest one.
+  static const maxSessionsPerUser = 20;
 
   static const _nonceLength = 16;
   static const _expiryLength = 8;
@@ -47,6 +58,7 @@ class Auth {
   final DateTime Function() _clock;
   final bool _trustProxy;
   final RateLimiter _signups;
+  final RateLimiter _logins;
   static final _random = Random.secure();
   static final _hmac = Hmac.sha256();
 
@@ -146,7 +158,12 @@ class Auth {
     }
     _usedChallenges[encodeBase64Url(body.challenge)] = challengeExpiresAt;
 
+    // Counted only after the signature checks out, so nobody else can use
+    // up a user's logins.
     final owner = encodeBase64Url(body.publicKey);
+    if (!_logins.allow(owner)) {
+      return errorResponse(429, 'too many logins, try again later');
+    }
     if (!await _store.userExists(owner) &&
         !_signups.allow(clientKey(request, trustProxy: _trustProxy))) {
       return errorResponse(429, 'too many new accounts, try again later');
@@ -155,7 +172,12 @@ class Auth {
     await _store.deleteExpiredSessions(now);
     final token = _randomBytes(32);
     final expiresAt = now.add(sessionTtl);
-    await _store.insertSession(await _hash(token), owner, expiresAt);
+    await _store.insertSession(
+      await _hash(token),
+      owner,
+      expiresAt,
+      maxPerOwner: maxSessionsPerUser,
+    );
     return jsonResponse(
       TokenResponse(
         token: encodeBase64Url(token),

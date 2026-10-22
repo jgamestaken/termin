@@ -36,6 +36,7 @@ void main() {
 
     final store = SqliteStore.open(path, maxTotalBytes: 100);
     addTearDown(store.close);
+    expect(await store.listBlobs('u'), hasLength(2));
     await expectLater(
       store.putBlob('u', 'c', Uint8List(41), ifMatch: null, now: now),
       throwsA(isA<StorageFull>()),

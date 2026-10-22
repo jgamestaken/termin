@@ -9,7 +9,12 @@ const int maxBlobBytes = 1024 * 1024;
 const int maxBlobsPerUser = 1000;
 
 /// Most bytes of live blobs a single user may hold.
-const int maxBytesPerUser = 32 * 1024 * 1024;
+const int maxBytesPerUser = 1024 * 1024;
+
+/// Most tombstones kept per user. Past this the oldest are dropped, so a
+/// client that sees a blob it synced before missing from `GET /blobs` should
+/// treat it as deleted.
+const int maxTombstonesPerUser = 1000;
 
 /// Server-side metadata for a blob. The content itself is opaque ciphertext.
 class BlobMeta {

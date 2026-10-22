@@ -131,17 +131,31 @@ void main() {
   });
 
   test('enforces the per-user byte limit on live blobs', () async {
-    const count = maxBytesPerUser ~/ maxBlobBytes;
-    for (var i = 0; i < count; i++) {
-      expect(await put('b$i', Uint8List(maxBlobBytes), create: true), 200);
-    }
+    const half = maxBytesPerUser ~/ 2;
+    expect(await put('a', Uint8List(half), create: true), 200);
+    expect(await put('b', Uint8List(half), create: true), 200);
     expect(await put('over', 'x', create: true), 413);
+    expect(await put('a', Uint8List(half + 1), ifMatch: '"1"'), 413);
     // Shrinking is allowed, and frees room.
-    expect(await put('b0', Uint8List(10), ifMatch: '"1"'), 200);
+    expect(await put('a', Uint8List(10), ifMatch: '"1"'), 200);
     expect(await put('over', 'x', create: true), 200);
-    expect(await delete('b1', ifMatch: '"1"'), 204);
-    expect(await put('b2', Uint8List(maxBlobBytes), ifMatch: '"1"'), 200);
-    expect(await put('big', Uint8List(maxBlobBytes ~/ 2), create: true), 200);
+    // Deleting frees room too.
+    expect(await delete('b', ifMatch: '"1"'), 204);
+    expect(await put('a', Uint8List(half), ifMatch: '"2"'), 200);
+  });
+
+  test('keeps only the newest tombstones', () async {
+    for (var i = 0; i <= maxTombstonesPerUser; i++) {
+      await put('t$i', 'x', create: true);
+      expect(await delete('t$i', ifMatch: '"1"'), 204);
+    }
+    final ids = {for (final meta in await list()) meta.id};
+    expect(ids, hasLength(maxTombstonesPerUser));
+    expect(ids, isNot(contains('t0')));
+    expect(ids, contains('t1'));
+    expect(ids, contains('t$maxTombstonesPerUser'));
+    // A dropped tombstone's id can be created again.
+    expect(await put('t0', 'y', create: true), 200);
   });
 
   test('enforces the server-wide byte limit', () async {

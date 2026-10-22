@@ -26,11 +26,14 @@ abstract interface class Store {
   /// Records [owner] if it hasn't been seen before.
   Future<void> upsertUser(String owner, DateTime now);
 
+  /// Adds a session, then drops [owner]'s oldest sessions beyond
+  /// [maxPerOwner].
   Future<void> insertSession(
     Uint8List tokenHash,
     String owner,
-    DateTime expiresAt,
-  );
+    DateTime expiresAt, {
+    required int maxPerOwner,
+  });
 
   /// The owner of an unexpired session with [tokenHash], or null.
   Future<String?> findSession(Uint8List tokenHash, DateTime now);
@@ -55,7 +58,8 @@ abstract interface class Store {
     required DateTime now,
   });
 
-  /// Turns a live blob into a tombstone.
+  /// Turns a live blob into a tombstone, then drops [owner]'s oldest
+  /// tombstones beyond [maxTombstonesPerUser].
   ///
   /// Throws [BlobNotFound] or [PreconditionFailed].
   Future<BlobMeta> deleteBlob(

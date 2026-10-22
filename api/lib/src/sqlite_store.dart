@@ -55,6 +55,9 @@ class SqliteStore implements Store {
     ALTER TABLE blobs ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
     UPDATE blobs SET size = COALESCE(LENGTH(data), 0);
     ''',
+    '''
+    CREATE INDEX sessions_owner ON sessions(owner);
+    ''',
   ];
 
   void _migrate() {
@@ -115,11 +118,20 @@ class SqliteStore implements Store {
   Future<void> insertSession(
     Uint8List tokenHash,
     String owner,
-    DateTime expiresAt,
-  ) async => _db.execute(
-    'INSERT INTO sessions (token_hash, owner, expires_at) VALUES (?, ?, ?)',
-    [tokenHash, owner, _ms(expiresAt)],
-  );
+    DateTime expiresAt, {
+    required int maxPerOwner,
+  }) async => _transaction(() {
+    _db.execute(
+      'INSERT INTO sessions (token_hash, owner, expires_at) VALUES (?, ?, ?)',
+      [tokenHash, owner, _ms(expiresAt)],
+    );
+    _db.execute(
+      'DELETE FROM sessions WHERE owner = ? AND rowid NOT IN ('
+      'SELECT rowid FROM sessions WHERE owner = ? '
+      'ORDER BY expires_at DESC, rowid DESC LIMIT ?)',
+      [owner, owner, maxPerOwner],
+    );
+  });
 
   @override
   Future<String?> findSession(Uint8List tokenHash, DateTime now) async {
@@ -233,6 +245,12 @@ class SqliteStore implements Store {
         'UPDATE blobs SET version = ?, data = NULL, size = 0, updated_at = ?, '
         'deleted = 1 WHERE owner = ? AND id = ?',
         [version, _ms(now), owner, id],
+      );
+      _db.execute(
+        'DELETE FROM blobs WHERE owner = ? AND deleted = 1 AND rowid NOT IN ('
+        'SELECT rowid FROM blobs WHERE owner = ? AND deleted = 1 '
+        'ORDER BY updated_at DESC, rowid DESC LIMIT ?)',
+        [owner, owner, maxTombstonesPerUser],
       );
       return BlobMeta(
         id: id,

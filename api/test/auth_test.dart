@@ -156,6 +156,30 @@ void main() {
     expect(await signup('2001:db8:0:1::1'), 200);
   });
 
+  test('keeps only the newest sessions per user', () async {
+    final tokens = [
+      for (var i = 0; i <= Auth.maxSessionsPerUser; i++)
+        await api.login(keyPair),
+    ];
+    Future<int> status(String token) async =>
+        (await api.send('GET', '/blobs', headers: bearer(token))).statusCode;
+    expect(await status(tokens.first), 401);
+    expect(await status(tokens[1]), 200);
+    expect(await status(tokens.last), 200);
+  });
+
+  test('limits logins per user', () async {
+    for (var i = 0; i < Auth.loginsPerHour; i++) {
+      expect((await api.tryLogin(keyPair)).statusCode, 200, reason: '$i');
+    }
+    expect((await api.tryLogin(keyPair)).statusCode, 429);
+    // Other users are unaffected.
+    expect((await api.tryLogin()).statusCode, 200);
+
+    api.now = api.now.add(const Duration(hours: 1));
+    expect((await api.tryLogin(keyPair)).statusCode, 200);
+  });
+
   test('rejects an expired challenge', () async {
     final challenge = (await api.challenge(publicKey)).challenge;
     api.now = api.now.add(const Duration(seconds: 61));
