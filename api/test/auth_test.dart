@@ -1,6 +1,8 @@
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:termin_api/src/auth.dart';
+import 'package:termin_api/src/http.dart';
 import 'package:termin_core/termin_core.dart';
 import 'package:test/test.dart';
 
@@ -69,10 +71,89 @@ void main() {
     expect(await requestToken(challenge, signature), 401);
   });
 
-  test('a failed attempt burns the challenge', () async {
+  test('a failed attempt does not burn the challenge', () async {
     final challenge = (await api.challenge(publicKey)).challenge;
     expect(await requestToken(challenge, Uint8List(64)), 401);
-    expect(await requestToken(challenge, await sign(keyPair, challenge)), 401);
+    expect(await requestToken(challenge, await sign(keyPair, challenge)), 200);
+  });
+
+  test('rejects a tampered or foreign challenge', () async {
+    final challenge = (await api.challenge(publicKey)).challenge;
+    for (final index in [0, 16, challenge.length - 1]) {
+      final tampered = Uint8List.fromList(challenge);
+      tampered[index] ^= 1;
+      expect(
+        await requestToken(tampered, await sign(keyPair, tampered)),
+        401,
+        reason: 'byte $index',
+      );
+    }
+    final random = Uint8List(32);
+    expect(await requestToken(random, await sign(keyPair, random)), 401);
+
+    // Another server instance has its own MAC key.
+    final foreign = (await TestApi().challenge(publicKey)).challenge;
+    expect(await requestToken(foreign, await sign(keyPair, foreign)), 401);
+  });
+
+  test('a flood of challenges does not block logins', () async {
+    final other = await publicKeyOf(await Ed25519().newKeyPair());
+    for (var i = 0; i < 20000; i++) {
+      await api.send(
+        'POST',
+        '/auth/challenge',
+        body: ChallengeRequest(publicKey: other).toJson(),
+      );
+    }
+    expect((await api.tryLogin(keyPair)).statusCode, 200);
+  });
+
+  test('rejects oversized auth bodies', () async {
+    final big = {'publicKey': 'A' * maxJsonBytes};
+    for (final path in ['/auth/challenge', '/auth/token']) {
+      expect((await api.send('POST', path, body: big)).statusCode, 413);
+      final streamed = await api.send(
+        'POST',
+        path,
+        body: Stream.fromIterable([Uint8List(maxJsonBytes), Uint8List(1)]),
+      );
+      expect(streamed.statusCode, 413, reason: '$path streamed');
+    }
+  });
+
+  test('limits new users per client address', () async {
+    final existing = await Ed25519().newKeyPair();
+    expect((await api.tryLogin(existing)).statusCode, 200);
+    for (var i = 1; i < Auth.signupsPerHour; i++) {
+      expect((await api.tryLogin()).statusCode, 200, reason: 'signup $i');
+    }
+    expect((await api.tryLogin()).statusCode, 429);
+    // Existing users can still log in.
+    expect((await api.tryLogin(existing)).statusCode, 200);
+
+    api.now = api.now.add(const Duration(hours: 1));
+    expect((await api.tryLogin()).statusCode, 200);
+  });
+
+  test('with trustProxy, limits by the last X-Forwarded-For entry', () async {
+    api = TestApi(trustProxy: true);
+    Future<int> signup(String forwardedFor) async => (await api.tryLogin(null, {
+      'x-forwarded-for': forwardedFor,
+    })).statusCode;
+
+    for (var i = 0; i < Auth.signupsPerHour; i++) {
+      // The client-supplied first entry varies and must be ignored.
+      expect(await signup('10.0.0.$i, 192.0.2.1'), 200);
+    }
+    expect(await signup('10.0.0.99, 192.0.2.1'), 429);
+    expect(await signup('192.0.2.2'), 200);
+
+    // IPv6 clients are limited per /64.
+    for (var i = 0; i < Auth.signupsPerHour; i++) {
+      expect(await signup('2001:db8::$i'), 200);
+    }
+    expect(await signup('2001:db8::ffff'), 429);
+    expect(await signup('2001:db8:0:1::1'), 200);
   });
 
   test('rejects an expired challenge', () async {

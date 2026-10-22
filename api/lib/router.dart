@@ -11,9 +11,15 @@ import 'src/store.dart';
 export 'src/sqlite_store.dart';
 export 'src/store.dart';
 
-Router buildRouter({required Store store, DateTime Function()? clock}) {
+/// With [trustProxy], client addresses for rate limiting come from the last
+/// `X-Forwarded-For` entry. Only set it behind a proxy that appends one.
+Router buildRouter({
+  required Store store,
+  DateTime Function()? clock,
+  bool trustProxy = false,
+}) {
   clock ??= () => DateTime.now().toUtc();
-  final auth = Auth(store, clock);
+  final auth = Auth(store, clock, trustProxy: trustProxy);
   final blobs = Blobs(store, clock);
   Handler authed(Handler handler) => auth.middleware(handler);
 

@@ -72,12 +72,12 @@ class Blobs {
       );
     }
 
-    final contentLength = request.contentLength;
-    if (contentLength != null && contentLength > maxBlobBytes) {
+    final Uint8List data;
+    try {
+      data = await readBodyLimited(request, maxBlobBytes);
+    } on BodyTooLarge {
       return errorResponse(413, 'blob too large');
     }
-    final data = await _readLimited(request);
-    if (data == null) return errorResponse(413, 'blob too large');
 
     try {
       final meta = await _store.putBlob(
@@ -92,7 +92,9 @@ class Blobs {
     } on PreconditionFailed {
       return errorResponse(412, 'version mismatch');
     } on QuotaExceeded {
-      return errorResponse(413, 'blob limit reached');
+      return errorResponse(413, 'quota exceeded');
+    } on StorageFull {
+      return errorResponse(507, 'server storage full');
     }
   }
 
@@ -122,15 +124,5 @@ class Blobs {
     } on PreconditionFailed {
       return errorResponse(412, 'version mismatch');
     }
-  }
-
-  /// The body, or null once it exceeds [maxBlobBytes].
-  static Future<Uint8List?> _readLimited(Request request) async {
-    final builder = BytesBuilder(copy: false);
-    await for (final chunk in request.read()) {
-      builder.add(chunk);
-      if (builder.length > maxBlobBytes) return null;
-    }
-    return builder.takeBytes();
   }
 }

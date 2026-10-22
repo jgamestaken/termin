@@ -7,18 +7,27 @@ import 'store.dart';
 
 /// [Store] backed by a single SQLite database file.
 class SqliteStore implements Store {
-  SqliteStore._(this._db) {
+  SqliteStore._(this._db, this.maxTotalBytes) {
     _db.execute('PRAGMA journal_mode = WAL');
     _db.execute('PRAGMA foreign_keys = ON');
     _migrate();
+    _totalBytes = _sum('SELECT COALESCE(SUM(size), 0) FROM blobs', []);
   }
 
   /// Opens (creating if needed) the database at [path].
-  factory SqliteStore.open(String path) => SqliteStore._(sqlite3.open(path));
+  factory SqliteStore.open(String path, {int? maxTotalBytes}) =>
+      SqliteStore._(sqlite3.open(path), maxTotalBytes);
 
-  factory SqliteStore.inMemory() => SqliteStore._(sqlite3.openInMemory());
+  factory SqliteStore.inMemory({int? maxTotalBytes}) =>
+      SqliteStore._(sqlite3.openInMemory(), maxTotalBytes);
 
   final Database _db;
+
+  /// Server-wide limit on live blob bytes, or null for no limit.
+  final int? maxTotalBytes;
+
+  /// Live blob bytes across all users. Only this process writes the database.
+  late int _totalBytes;
 
   static const _migrations = [
     '''
@@ -41,6 +50,10 @@ class SqliteStore implements Store {
       deleted INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (owner, id)
     );
+    ''',
+    '''
+    ALTER TABLE blobs ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
+    UPDATE blobs SET size = COALESCE(LENGTH(data), 0);
     ''',
   ];
 
@@ -70,17 +83,27 @@ class SqliteStore implements Store {
   static DateTime _time(int ms) =>
       DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true);
 
-  ({int version, bool deleted})? _current(String owner, String id) {
+  int _sum(String sql, List<Object?> parameters) =>
+      _db.select(sql, parameters).first.columnAt(0) as int;
+
+  ({int version, bool deleted, int size})? _current(String owner, String id) {
     final rows = _db.select(
-      'SELECT version, deleted FROM blobs WHERE owner = ? AND id = ?',
+      'SELECT version, deleted, size FROM blobs WHERE owner = ? AND id = ?',
       [owner, id],
     );
     if (rows.isEmpty) return null;
     return (
       version: rows.first['version'] as int,
       deleted: rows.first['deleted'] == 1,
+      size: rows.first['size'] as int,
     );
   }
+
+  @override
+  Future<bool> userExists(String owner) async => _db.select(
+    'SELECT 1 FROM users WHERE public_key = ?',
+    [owner],
+  ).isNotEmpty;
 
   @override
   Future<void> upsertUser(String owner, DateTime now) async => _db.execute(
@@ -152,31 +175,45 @@ class SqliteStore implements Store {
     Uint8List data, {
     required int? ifMatch,
     required DateTime now,
-  }) async => _transaction(() {
-    final current = _current(owner, id);
-    if (current?.version != ifMatch) throw PreconditionFailed();
-    if (current == null || current.deleted) {
-      final live =
-          _db
-                  .select(
-                    'SELECT COUNT(*) FROM blobs WHERE owner = ? AND deleted = 0',
-                    [owner],
-                  )
-                  .first
-                  .columnAt(0)
-              as int;
-      if (live >= maxBlobsPerUser) throw QuotaExceeded();
-    }
-    final version = (current?.version ?? 0) + 1;
-    _db.execute(
-      'INSERT INTO blobs (owner, id, version, data, updated_at, deleted) '
-      'VALUES (?, ?, ?, ?, ?, 0) '
-      'ON CONFLICT (owner, id) DO UPDATE SET version = excluded.version, '
-      'data = excluded.data, updated_at = excluded.updated_at, deleted = 0',
-      [owner, id, version, data, _ms(now)],
-    );
-    return BlobMeta(id: id, version: version, updatedAt: _time(_ms(now)));
-  });
+  }) async {
+    var growth = 0;
+    final meta = _transaction(() {
+      final current = _current(owner, id);
+      if (current?.version != ifMatch) throw PreconditionFailed();
+      if (current == null || current.deleted) {
+        final live = _sum(
+          'SELECT COUNT(*) FROM blobs WHERE owner = ? AND deleted = 0',
+          [owner],
+        );
+        if (live >= maxBlobsPerUser) throw QuotaExceeded();
+      }
+      // Tombstones have size 0. Shrinking writes are always allowed.
+      growth = data.length - (current?.size ?? 0);
+      if (growth > 0) {
+        final used = _sum(
+          'SELECT COALESCE(SUM(size), 0) FROM blobs WHERE owner = ?',
+          [owner],
+        );
+        if (used + growth > maxBytesPerUser) throw QuotaExceeded();
+        final limit = maxTotalBytes;
+        if (limit != null && _totalBytes + growth > limit) {
+          throw StorageFull();
+        }
+      }
+      final version = (current?.version ?? 0) + 1;
+      _db.execute(
+        'INSERT INTO blobs (owner, id, version, data, size, updated_at, deleted) '
+        'VALUES (?, ?, ?, ?, ?, ?, 0) '
+        'ON CONFLICT (owner, id) DO UPDATE SET version = excluded.version, '
+        'data = excluded.data, size = excluded.size, '
+        'updated_at = excluded.updated_at, deleted = 0',
+        [owner, id, version, data, data.length, _ms(now)],
+      );
+      return BlobMeta(id: id, version: version, updatedAt: _time(_ms(now)));
+    });
+    _totalBytes += growth;
+    return meta;
+  }
 
   @override
   Future<BlobMeta> deleteBlob(
@@ -184,23 +221,29 @@ class SqliteStore implements Store {
     String id, {
     required int ifMatch,
     required DateTime now,
-  }) async => _transaction(() {
-    final current = _current(owner, id);
-    if (current == null || current.deleted) throw BlobNotFound();
-    if (current.version != ifMatch) throw PreconditionFailed();
-    final version = current.version + 1;
-    _db.execute(
-      'UPDATE blobs SET version = ?, data = NULL, updated_at = ?, deleted = 1 '
-      'WHERE owner = ? AND id = ?',
-      [version, _ms(now), owner, id],
-    );
-    return BlobMeta(
-      id: id,
-      version: version,
-      updatedAt: _time(_ms(now)),
-      deleted: true,
-    );
-  });
+  }) async {
+    var freed = 0;
+    final meta = _transaction(() {
+      final current = _current(owner, id);
+      if (current == null || current.deleted) throw BlobNotFound();
+      if (current.version != ifMatch) throw PreconditionFailed();
+      freed = current.size;
+      final version = current.version + 1;
+      _db.execute(
+        'UPDATE blobs SET version = ?, data = NULL, size = 0, updated_at = ?, '
+        'deleted = 1 WHERE owner = ? AND id = ?',
+        [version, _ms(now), owner, id],
+      );
+      return BlobMeta(
+        id: id,
+        version: version,
+        updatedAt: _time(_ms(now)),
+        deleted: true,
+      );
+    });
+    _totalBytes -= freed;
+    return meta;
+  }
 
   @override
   Future<void> close() async => _db.close();

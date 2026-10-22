@@ -8,11 +8,16 @@ import 'package:termin_core/termin_core.dart';
 
 /// A router over an in-memory store with a controllable clock.
 class TestApi {
-  TestApi() {
-    handler = buildRouter(store: store, clock: () => now).call;
+  TestApi({int? maxTotalBytes, bool trustProxy = false})
+    : store = SqliteStore.inMemory(maxTotalBytes: maxTotalBytes) {
+    handler = buildRouter(
+      store: store,
+      clock: () => now,
+      trustProxy: trustProxy,
+    ).call;
   }
 
-  final store = SqliteStore.inMemory();
+  final SqliteStore store;
   DateTime now = DateTime.utc(2026, 10, 21, 12);
   late final Handler handler;
 
@@ -41,12 +46,15 @@ class TestApi {
     return ChallengeResponse.fromJson(await readJson(response));
   }
 
-  /// Logs in with a fresh or given identity and returns a bearer token.
-  Future<String> login([SimpleKeyPair? keyPair]) async {
+  /// Logs in with a fresh or given identity and returns the response.
+  Future<Response> tryLogin([
+    SimpleKeyPair? keyPair,
+    Map<String, String> headers = const {},
+  ]) async {
     keyPair ??= await Ed25519().newKeyPair();
     final publicKey = await publicKeyOf(keyPair);
     final challenge = await this.challenge(publicKey);
-    final response = await send(
+    return send(
       'POST',
       '/auth/token',
       body: TokenRequest(
@@ -54,9 +62,13 @@ class TestApi {
         challenge: challenge.challenge,
         signature: await sign(keyPair, challenge.challenge),
       ).toJson(),
+      headers: headers,
     );
-    return TokenResponse.fromJson(await readJson(response)).token;
   }
+
+  /// Logs in with a fresh or given identity and returns a bearer token.
+  Future<String> login([SimpleKeyPair? keyPair]) async =>
+      TokenResponse.fromJson(await readJson(await tryLogin(keyPair))).token;
 }
 
 Future<Uint8List> publicKeyOf(SimpleKeyPair keyPair) async =>

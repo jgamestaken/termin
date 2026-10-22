@@ -6,6 +6,7 @@ import 'package:shelf/shelf.dart';
 import 'package:termin_core/termin_core.dart';
 
 import 'http.dart';
+import 'rate_limit.dart';
 import 'store.dart';
 
 const _ownerKey = 'termin.owner';
@@ -18,31 +19,63 @@ extension RequestOwner on Request {
 /// Challenge/response login with Ed25519 identity keys, and bearer sessions.
 ///
 /// There is no signup step: the first successful login creates the user.
+///
+/// Challenges are stateless: each carries its expiry and an HMAC over it and
+/// the public key it was issued for, so issuing one stores nothing. Only
+/// challenges that were successfully answered are remembered, until they
+/// expire, to keep them single use.
 class Auth {
-  Auth(this._store, this._clock);
+  Auth(this._store, this._clock, {required this._trustProxy})
+    : _signups = RateLimiter(
+        limit: signupsPerHour,
+        window: const Duration(hours: 1),
+        clock: _clock,
+      );
 
   static const challengeTtl = Duration(seconds: 60);
   static const sessionTtl = Duration(days: 7);
-  static const _maxPendingChallenges = 10000;
+
+  /// New users a single client address may create per hour.
+  static const signupsPerHour = 10;
+
+  static const _nonceLength = 16;
+  static const _expiryLength = 8;
+  static const _macLength = 32;
+  static const _challengeLength = _nonceLength + _expiryLength + _macLength;
 
   final Store _store;
   final DateTime Function() _clock;
-  final _random = Random.secure();
+  final bool _trustProxy;
+  final RateLimiter _signups;
+  static final _random = Random.secure();
+  static final _hmac = Hmac.sha256();
 
-  /// Outstanding challenges, keyed by base64url challenge.
-  final _challenges = <String, ({String owner, DateTime expiresAt})>{};
+  /// Per-process key for challenge MACs. A restart only invalidates logins
+  /// that are in flight.
+  final _challengeKey = SecretKey(_randomBytes(32));
 
-  Uint8List _randomBytes(int length) =>
+  /// Answered challenges (base64url) and when they expire.
+  final _usedChallenges = <String, DateTime>{};
+
+  static Uint8List _randomBytes(int length) =>
       Uint8List.fromList(List.generate(length, (_) => _random.nextInt(256)));
 
   static Future<Uint8List> _hash(List<int> bytes) async =>
       Uint8List.fromList((await Sha256().hash(bytes)).bytes);
+
+  Future<Mac> _challengeMac(List<int> publicKey, List<int> nonceAndExpiry) =>
+      _hmac.calculateMac([
+        ...publicKey,
+        ...nonceAndExpiry,
+      ], secretKey: _challengeKey);
 
   /// `POST /auth/challenge`
   Future<Response> challenge(Request request) async {
     final ChallengeRequest body;
     try {
       body = ChallengeRequest.fromJson((await readJsonObject(request))!);
+    } on BodyTooLarge {
+      return errorResponse(413, 'request too large');
     } on Object {
       return errorResponse(400, 'invalid request');
     }
@@ -50,21 +83,44 @@ class Auth {
       return errorResponse(400, 'invalid public key');
     }
 
-    final now = _clock();
-    _challenges.removeWhere((_, c) => !c.expiresAt.isAfter(now));
-    if (_challenges.length >= _maxPendingChallenges) {
-      return errorResponse(503, 'too many pending logins');
-    }
-
-    final challenge = _randomBytes(32);
-    final expiresAt = now.add(challengeTtl);
-    _challenges[encodeBase64Url(challenge)] = (
-      owner: encodeBase64Url(body.publicKey),
-      expiresAt: expiresAt,
-    );
+    final expiresAt = _clock().add(challengeTtl);
+    final nonceAndExpiry = Uint8List(_nonceLength + _expiryLength)
+      ..setAll(0, _randomBytes(_nonceLength));
+    ByteData.sublistView(
+      nonceAndExpiry,
+      _nonceLength,
+    ).setInt64(0, expiresAt.millisecondsSinceEpoch);
+    final mac = await _challengeMac(body.publicKey, nonceAndExpiry);
     return jsonResponse(
-      ChallengeResponse(challenge: challenge, expiresAt: expiresAt).toJson(),
+      ChallengeResponse(
+        challenge: Uint8List.fromList([...nonceAndExpiry, ...mac.bytes]),
+        expiresAt: expiresAt,
+      ).toJson(),
     );
+  }
+
+  /// When [challenge] expires, if it is an unused, unexpired challenge this
+  /// server issued for [publicKey]. Otherwise null.
+  Future<DateTime?> _checkChallenge(
+    Uint8List publicKey,
+    Uint8List challenge,
+    DateTime now,
+  ) async {
+    if (challenge.length != _challengeLength) return null;
+    const macOffset = _nonceLength + _expiryLength;
+    final expected = await _challengeMac(
+      publicKey,
+      challenge.sublist(0, macOffset),
+    );
+    if (Mac(challenge.sublist(macOffset)) != expected) return null;
+    // Only parse the expiry once the MAC shows this server wrote it.
+    final expiresAt = DateTime.fromMillisecondsSinceEpoch(
+      ByteData.sublistView(challenge, _nonceLength).getInt64(0),
+      isUtc: true,
+    );
+    if (!expiresAt.isAfter(now)) return null;
+    if (_usedChallenges.containsKey(encodeBase64Url(challenge))) return null;
+    return expiresAt;
   }
 
   /// `POST /auth/token`
@@ -72,22 +128,29 @@ class Auth {
     final TokenRequest body;
     try {
       body = TokenRequest.fromJson((await readJsonObject(request))!);
+    } on BodyTooLarge {
+      return errorResponse(413, 'request too large');
     } on Object {
       return errorResponse(400, 'invalid request');
     }
 
     final now = _clock();
-    final owner = encodeBase64Url(body.publicKey);
-    // Single use: consumed whether or not the signature checks out.
-    final pending = _challenges.remove(encodeBase64Url(body.challenge));
-    if (pending == null ||
-        pending.owner != owner ||
-        !pending.expiresAt.isAfter(now) ||
+    _usedChallenges.removeWhere((_, expiresAt) => !expiresAt.isAfter(now));
+    final challengeExpiresAt = body.publicKey.length == publicKeyLength
+        ? await _checkChallenge(body.publicKey, body.challenge, now)
+        : null;
+    if (challengeExpiresAt == null ||
         body.signature.length != 64 ||
         !await _verify(body)) {
       return errorResponse(401, 'authentication failed');
     }
+    _usedChallenges[encodeBase64Url(body.challenge)] = challengeExpiresAt;
 
+    final owner = encodeBase64Url(body.publicKey);
+    if (!await _store.userExists(owner) &&
+        !_signups.allow(clientKey(request, trustProxy: _trustProxy))) {
+      return errorResponse(429, 'too many new accounts, try again later');
+    }
     await _store.upsertUser(owner, now);
     await _store.deleteExpiredSessions(now);
     final token = _randomBytes(32);

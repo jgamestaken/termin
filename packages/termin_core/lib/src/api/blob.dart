@@ -8,6 +8,9 @@ const int maxBlobBytes = 1024 * 1024;
 /// Most live (non-deleted) blobs a single user may hold.
 const int maxBlobsPerUser = 1000;
 
+/// Most bytes of live blobs a single user may hold.
+const int maxBytesPerUser = 32 * 1024 * 1024;
+
 /// Server-side metadata for a blob. The content itself is opaque ciphertext.
 class BlobMeta {
   const BlobMeta({

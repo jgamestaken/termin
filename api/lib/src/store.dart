@@ -5,8 +5,11 @@ import 'package:termin_core/termin_core.dart';
 /// The blob's current version didn't match the request's precondition.
 class PreconditionFailed implements Exception {}
 
-/// Writing would exceed [maxBlobsPerUser].
+/// Writing would exceed [maxBlobsPerUser] or [maxBytesPerUser].
 class QuotaExceeded implements Exception {}
+
+/// Writing would exceed the server-wide storage limit.
+class StorageFull implements Exception {}
 
 /// The blob doesn't exist (or is already deleted).
 class BlobNotFound implements Exception {}
@@ -18,6 +21,8 @@ typedef StoredBlob = ({BlobMeta meta, Uint8List data});
 ///
 /// Owners are identified by their base64url-encoded Ed25519 public key.
 abstract interface class Store {
+  Future<bool> userExists(String owner);
+
   /// Records [owner] if it hasn't been seen before.
   Future<void> upsertUser(String owner, DateTime now);
 
@@ -41,7 +46,7 @@ abstract interface class Store {
   /// Creates ([ifMatch] null) or replaces ([ifMatch] = current version) a
   /// blob. Replacing a tombstone revives it.
   ///
-  /// Throws [PreconditionFailed] or [QuotaExceeded].
+  /// Throws [PreconditionFailed], [QuotaExceeded] or [StorageFull].
   Future<BlobMeta> putBlob(
     String owner,
     String id,

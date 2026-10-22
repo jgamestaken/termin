@@ -130,6 +130,32 @@ void main() {
     expect(await put('b1', 'x', ifMatch: '"2"'), 413);
   });
 
+  test('enforces the per-user byte limit on live blobs', () async {
+    const count = maxBytesPerUser ~/ maxBlobBytes;
+    for (var i = 0; i < count; i++) {
+      expect(await put('b$i', Uint8List(maxBlobBytes), create: true), 200);
+    }
+    expect(await put('over', 'x', create: true), 413);
+    // Shrinking is allowed, and frees room.
+    expect(await put('b0', Uint8List(10), ifMatch: '"1"'), 200);
+    expect(await put('over', 'x', create: true), 200);
+    expect(await delete('b1', ifMatch: '"1"'), 204);
+    expect(await put('b2', Uint8List(maxBlobBytes), ifMatch: '"1"'), 200);
+    expect(await put('big', Uint8List(maxBlobBytes ~/ 2), create: true), 200);
+  });
+
+  test('enforces the server-wide byte limit', () async {
+    api = TestApi(maxTotalBytes: 100);
+    token = await api.login();
+    final other = await api.login();
+    expect(await put('a', Uint8List(60), create: true), 200);
+    expect(await put('b', Uint8List(41), create: true, as: other), 507);
+    expect(await put('b', Uint8List(40), create: true, as: other), 200);
+    expect(await put('c', 'x', create: true), 507);
+    expect(await delete('a', ifMatch: '"1"'), 204);
+    expect(await put('c', Uint8List(60), create: true), 200);
+  });
+
   test('users cannot see each other\'s blobs', () async {
     await put('m1', 'secret', create: true);
     final other = await api.login();
